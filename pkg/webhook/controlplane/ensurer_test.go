@@ -42,7 +42,9 @@ import (
 	vpaautoscalingv1 "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
+	"github.com/gardener/gardener-extension-provider-aws/imagevector"
 	"github.com/gardener/gardener-extension-provider-aws/pkg/aws"
 )
 
@@ -358,17 +360,16 @@ ExecStart=/opt/bin/mtu-customizer.sh
 			ensurer := NewEnsurer(logger)
 
 			// Call EnsureAdditionalUnits method and check the result
-			err := ensurer.EnsureAdditionalUnits(ctx, dummyContext, &units, nil)
+			err := ensurer.EnsureAdditionalUnits(ctx, eContextK8s126, &units, nil)
 			Expect(err).To(Not(HaveOccurred()))
 			Expect(units).To(ConsistOf(oldUnit, additionalUnit))
 		})
 	})
 
 	Describe("#EnsureAdditionalFiles", func() {
-		It("should add additional files to the current ones", func() {
-			var (
-				permissions       int32 = 0755
-				customFileContent       = `#!/bin/sh
+		var (
+			permissions       int32 = 0755
+			customFileContent       = `#!/bin/sh
 
 for interface_path in $(find /sys/class/net  -type l -print)
 do
@@ -385,8 +386,57 @@ do
 done
 `
 
-				filePath = "/opt/bin/mtu-customizer.sh"
+			filePath = "/opt/bin/mtu-customizer.sh"
+		)
+		It("should add additional files to the current ones in k8s >=v1.27", func() {
+			image, err := imagevector.ImageVector().FindImage(aws.ECRCredentialProviderImageName)
+			Expect(err).NotTo(HaveOccurred())
+			var (
+				oldFile = extensionsv1alpha1.File{Path: "oldpath"}
+				ecrBin  = extensionsv1alpha1.File{
+					Path:        "/opt/bin/ecr-credential-provider",
+					Permissions: ptr.To(int32(0755)),
+					Content: extensionsv1alpha1.FileContent{
+						ImageRef: &extensionsv1alpha1.FileContentImageRef{
+							Image:           image.String(),
+							FilePathInImage: "/bin/ecr-credential-provider",
+						},
+					},
+				}
+				ecrConfig = extensionsv1alpha1.File{
+					Path:        "/opt/ecr-credential-provider-config.json",
+					Permissions: ptr.To(int32(0755)),
+					Content: extensionsv1alpha1.FileContent{
+						Inline: &extensionsv1alpha1.FileContentInline{
+							Data: `{"kind":"CredentialProviderConfig","apiVersion":"kubelet.config.k8s.io/v1","providers":[{"name":"ecr-credential-provider","matchImages":["*.dkr.ecr.*.amazonaws.com","*.dkr.ecr.*.amazonaws.com.cn"],"defaultCacheDuration":"1h0m0s","apiVersion":"credentialprovider.kubelet.k8s.io/v1"}]}`,
+						},
+					},
+				}
+				additionalFile = extensionsv1alpha1.File{
+					Path:        filePath,
+					Permissions: &permissions,
+					Content: extensionsv1alpha1.FileContent{
+						Inline: &extensionsv1alpha1.FileContentInline{
+							Encoding: "",
+							Data:     customFileContent,
+						},
+					},
+				}
 
+				files = []extensionsv1alpha1.File{oldFile}
+			)
+
+			// Create ensurer
+			ensurer := NewEnsurer(logger)
+
+			// Call EnsureAdditionalFiles method and check the result
+			err = ensurer.EnsureAdditionalFiles(ctx, eContextK8s127, &files, nil)
+			Expect(err).To(Not(HaveOccurred()))
+			Expect(files).To(ConsistOf(oldFile, additionalFile, ecrConfig, ecrBin))
+		})
+
+		It("should add additional files to the current ones", func() {
+			var (
 				oldFile        = extensionsv1alpha1.File{Path: "oldpath"}
 				additionalFile = extensionsv1alpha1.File{
 					Path:        filePath,
@@ -406,33 +456,13 @@ done
 			ensurer := NewEnsurer(logger)
 
 			// Call EnsureAdditionalFiles method and check the result
-			err := ensurer.EnsureAdditionalFiles(ctx, dummyContext, &files, nil)
+			err := ensurer.EnsureAdditionalFiles(ctx, eContextK8s126, &files, nil)
 			Expect(err).To(Not(HaveOccurred()))
 			Expect(files).To(ConsistOf(oldFile, additionalFile))
 		})
 
 		It("should overwrite existing files of the current ones", func() {
 			var (
-				permissions       int32 = 0755
-				customFileContent       = `#!/bin/sh
-
-for interface_path in $(find /sys/class/net  -type l -print)
-do
-	interface=$(basename ${interface_path})
-
-	if ls -l ${interface_path} | grep -q virtual
-	then
-		echo skipping virtual interface: ${interface}
-		continue
-	fi
-
-	echo changing mtu of non-virtual interface: ${interface}
-	ip link set dev ${interface} mtu 1460
-done
-`
-
-				filePath = "/opt/bin/mtu-customizer.sh"
-
 				oldFile        = extensionsv1alpha1.File{Path: "oldpath"}
 				additionalFile = extensionsv1alpha1.File{
 					Path:        filePath,
@@ -452,7 +482,7 @@ done
 			ensurer := NewEnsurer(logger)
 
 			// Call EnsureAdditionalFiles method and check the result
-			err := ensurer.EnsureAdditionalFiles(ctx, dummyContext, &files, nil)
+			err := ensurer.EnsureAdditionalFiles(ctx, eContextK8s126, &files, nil)
 			Expect(err).To(Not(HaveOccurred()))
 			Expect(files).To(ConsistOf(oldFile, additionalFile))
 			Expect(files).To(HaveLen(2))

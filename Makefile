@@ -27,6 +27,9 @@ LD_FLAGS                    := "-w $(shell bash $(GARDENER_HACK_DIR)/get-build-l
 LEADER_ELECTION             := false
 IGNORE_OPERATION_ANNOTATION := true
 
+ECR_KUBERNETES_VERSION := v1.29.0
+ECR_IMAGE_NAME := ecr-credential-provider
+
 WEBHOOK_CONFIG_PORT	:= 8443
 WEBHOOK_CONFIG_MODE	:= url
 WEBHOOK_CONFIG_URL	:= host.docker.internal:$(WEBHOOK_CONFIG_PORT)
@@ -93,10 +96,20 @@ install:
 docker-login:
 	@gcloud auth activate-service-account --key-file .kube-secrets/gcr/gcr-readwrite.json
 
+.PHONY: docker-image-provider
+docker-image-provider:
+	@docker buildx build --platform linux/amd64 --build-arg EFFECTIVE_VERSION=$(EFFECTIVE_VERSION) -t $(IMAGE_PREFIX)/$(NAME):$(VERSION)           -t $(IMAGE_PREFIX)/$(NAME):latest           -f Dockerfile -m 6g --target $(EXTENSION_PREFIX)-$(NAME)           .
+
+.PHONY: docker-image-admission
+docker-image-admission:
+	@docker buildx build --platform linux/amd64 --build-arg EFFECTIVE_VERSION=$(EFFECTIVE_VERSION) -t $(IMAGE_PREFIX)/$(ADMISSION_NAME):$(VERSION)           -t $(IMAGE_PREFIX)/$(ADMISSION_NAME):latest           -f Dockerfile -m 6g --target $(EXTENSION_PREFIX)-$(ADMISSION_NAME)           .
+
+.PHONY: docker-image-ecr
+docker-image-ecr:
+	docker buildx build --platform linux/amd64 --build-arg KUBERNETES_VERSION=$(ECR_KUBERNETES_VERSION) -t $(IMAGE_PREFIX)/$(ECR_IMAGE_NAME):$(ECR_KUBERNETES_VERSION) -t $(IMAGE_PREFIX)/$(ECR_IMAGE_NAME):latest -f hack/images/ECRDockerfile -m 6g .
+
 .PHONY: docker-images
-docker-images:
-	@docker build --build-arg EFFECTIVE_VERSION=$(EFFECTIVE_VERSION) -t $(IMAGE_PREFIX)/$(NAME):$(VERSION)           -t $(IMAGE_PREFIX)/$(NAME):latest           -f Dockerfile -m 6g --target $(EXTENSION_PREFIX)-$(NAME)           .
-	@docker build --build-arg EFFECTIVE_VERSION=$(EFFECTIVE_VERSION) -t $(IMAGE_PREFIX)/$(ADMISSION_NAME):$(VERSION) -t $(IMAGE_PREFIX)/$(ADMISSION_NAME):latest -f Dockerfile -m 6g --target $(EXTENSION_PREFIX)-$(ADMISSION_NAME) .
+docker-images: docker-image-provider docker-image-admission docker-image-ecr
 
 #####################################################################
 # Rules for verification, formatting, linting, testing and cleaning #

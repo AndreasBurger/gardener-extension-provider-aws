@@ -17,7 +17,9 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"regexp"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/coreos/go-systemd/v22/unit"
@@ -35,11 +37,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	vpaautoscalingv1 "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
+	kubeletconfigv1 "k8s.io/kubelet/config/v1"
 	kubeletconfigv1beta1 "k8s.io/kubelet/config/v1beta1"
 	"k8s.io/utils/pointer"
 
 	"github.com/gardener/gardener-extension-provider-aws/imagevector"
 	"github.com/gardener/gardener-extension-provider-aws/pkg/aws"
+)
+
+const (
+	ecrCredentialConfigLocation = "/opt/ecr-credential-provider-config.json"
+	ecrCredentialBinLocation    = "/opt/bin/"
 )
 
 // NewEnsurer creates a new controlplane ensurer.
@@ -331,10 +339,20 @@ func (e *ensurer) ensureChecksumAnnotations(template *corev1.PodTemplateSpec) er
 }
 
 // EnsureKubeletServiceUnitOptions ensures that the kubelet.service unit options conform to the provider requirements.
-func (e *ensurer) EnsureKubeletServiceUnitOptions(_ context.Context, _ gcontext.GardenContext, _ *semver.Version, newObj, _ []*unit.UnitOption) ([]*unit.UnitOption, error) {
+func (e *ensurer) EnsureKubeletServiceUnitOptions(_ context.Context, _ gcontext.GardenContext, kubeletVersion *semver.Version, newObj, _ []*unit.UnitOption) ([]*unit.UnitOption, error) {
 	if opt := extensionswebhook.UnitOptionWithSectionAndName(newObj, "Service", "ExecStart"); opt != nil {
 		command := extensionswebhook.DeserializeCommandLine(opt.Value)
-		command = ensureKubeletCommandLineArgs(command)
+		command = extensionswebhook.EnsureStringWithPrefix(command, "--cloud-provider=", "external")
+
+		k8sGreaterEqual127, err := versionutils.CompareVersions(kubeletVersion.String(), ">=", "1.27")
+		if err != nil {
+			return nil, err
+		}
+
+		if k8sGreaterEqual127 {
+			command = ensureKubeletECRProviderCommandLineArgs(command)
+		}
+
 		opt.Value = extensionswebhook.SerializeCommandLine(command, 1, " \\\n    ")
 	}
 
@@ -347,8 +365,10 @@ func (e *ensurer) EnsureKubeletServiceUnitOptions(_ context.Context, _ gcontext.
 	return newObj, nil
 }
 
-func ensureKubeletCommandLineArgs(command []string) []string {
-	return extensionswebhook.EnsureStringWithPrefix(command, "--cloud-provider=", "external")
+func ensureKubeletECRProviderCommandLineArgs(command []string) []string {
+	command = extensionswebhook.EnsureStringWithPrefix(command, "--image-credential-provider-config=", ecrCredentialConfigLocation)
+	command = extensionswebhook.EnsureStringWithPrefix(command, "--image-credential-provider-bin-dir=", ecrCredentialBinLocation)
+	return command
 }
 
 // EnsureKubeletConfiguration ensures that the kubelet configuration conforms to the provider requirements.
@@ -418,8 +438,68 @@ ExecStart=/opt/bin/mtu-customizer.sh
 	return nil
 }
 
-// EnsureAdditionalFiles ensures that additional required system files are added.
-func (e *ensurer) EnsureAdditionalFiles(_ context.Context, _ gcontext.GardenContext, newObj, _ *[]extensionsv1alpha1.File) error {
+func (e *ensurer) ensureCredentialHelperBin() (*extensionsv1alpha1.File, error) {
+	image, err := imagevector.ImageVector().FindImage(aws.ECRCredentialProviderImageName)
+	if err != nil {
+		return nil, err
+	}
+	binFile := &extensionsv1alpha1.File{
+		Path:        v1beta1constants.OperatingSystemConfigFilePathBinaries + "/ecr-credential-provider",
+		Permissions: pointer.Int32(0755),
+		Content: extensionsv1alpha1.FileContent{
+			ImageRef: &extensionsv1alpha1.FileContentImageRef{
+
+				Image:           image.String(),
+				FilePathInImage: "/bin/ecr-credential-provider",
+			},
+		},
+	}
+	return binFile, nil
+}
+
+func (e *ensurer) ensureCredentialHelperFiles() (*extensionsv1alpha1.File, error) {
+	var (
+		permissions int32 = 0755
+	)
+	cacheDuration, err := time.ParseDuration("1h")
+	if err != nil {
+		return nil, err
+	}
+	credentialProvider := kubeletconfigv1.CredentialProvider{
+		Name: "ecr-credential-provider",
+		MatchImages: []string{
+			"*.dkr.ecr.*.amazonaws.com",
+			"*.dkr.ecr.*.amazonaws.com.cn",
+		},
+		DefaultCacheDuration: &metav1.Duration{Duration: cacheDuration},
+		APIVersion:           "credentialprovider.kubelet.k8s.io/v1",
+	}
+	config := kubeletconfigv1.CredentialProviderConfig{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: kubeletconfigv1.SchemeGroupVersion.String(),
+			Kind:       "CredentialProviderConfig",
+		},
+		Providers: []kubeletconfigv1.CredentialProvider{
+			credentialProvider,
+		},
+	}
+
+	configJson, err := json.Marshal(config)
+	if err != nil {
+		return nil, err
+	}
+	return &extensionsv1alpha1.File{
+		Path:        ecrCredentialConfigLocation,
+		Permissions: &permissions,
+		Content: extensionsv1alpha1.FileContent{
+			Inline: &extensionsv1alpha1.FileContentInline{
+				Data: string(configJson),
+			},
+		},
+	}, nil
+}
+
+func (e *ensurer) ensureMTUFiles() *extensionsv1alpha1.File {
 	var (
 		permissions       int32 = 0755
 		customFileContent       = `#!/bin/sh
@@ -440,7 +520,7 @@ done
 `
 	)
 
-	appendUniqueFile(newObj, extensionsv1alpha1.File{
+	return &extensionsv1alpha1.File{
 		Path:        "/opt/bin/mtu-customizer.sh",
 		Permissions: &permissions,
 		Content: extensionsv1alpha1.FileContent{
@@ -449,7 +529,39 @@ done
 				Data:     customFileContent,
 			},
 		},
-	})
+	}
+}
+
+// EnsureAdditionalFiles ensures that additional required system files are added.
+func (e *ensurer) EnsureAdditionalFiles(ctx context.Context, gctx gcontext.GardenContext, newObj, _ *[]extensionsv1alpha1.File) error {
+	appendUniqueFile(newObj, *e.ensureMTUFiles())
+
+	cluster, err := gctx.GetCluster(ctx)
+	if err != nil {
+		return err
+	}
+
+	k8sGreaterEqual127, err := versionutils.CompareVersions(cluster.Shoot.Spec.Kubernetes.Version, ">=", "1.27")
+	if err != nil {
+		return err
+	}
+
+	// return early
+	if !k8sGreaterEqual127 {
+		return nil
+	}
+
+	binConfig, err := e.ensureCredentialHelperBin()
+	if err != nil {
+		return err
+	}
+	appendUniqueFile(newObj, *binConfig)
+
+	credConfig, err := e.ensureCredentialHelperFiles()
+	if err != nil {
+		return err
+	}
+	appendUniqueFile(newObj, *credConfig)
 	return nil
 }
 
