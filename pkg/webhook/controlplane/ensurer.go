@@ -438,12 +438,12 @@ ExecStart=/opt/bin/mtu-customizer.sh
 	return nil
 }
 
-func (e *ensurer) ensureCredentialHelperBin() (*extensionsv1alpha1.File, error) {
+func (e *ensurer) credentialProviderBinaryFile() (*extensionsv1alpha1.File, error) {
 	image, err := imagevector.ImageVector().FindImage(aws.ECRCredentialProviderImageName)
 	if err != nil {
 		return nil, err
 	}
-	binFile := &extensionsv1alpha1.File{
+	config := &extensionsv1alpha1.File{
 		Path:        v1beta1constants.OperatingSystemConfigFilePathBinaries + "/ecr-credential-provider",
 		Permissions: pointer.Int32(0755),
 		Content: extensionsv1alpha1.FileContent{
@@ -454,10 +454,10 @@ func (e *ensurer) ensureCredentialHelperBin() (*extensionsv1alpha1.File, error) 
 			},
 		},
 	}
-	return binFile, nil
+	return config, nil
 }
 
-func (e *ensurer) ensureCredentialHelperFiles() (*extensionsv1alpha1.File, error) {
+func (e *ensurer) credentialProviderConfigFile() (*extensionsv1alpha1.File, error) {
 	var (
 		permissions int32 = 0755
 	)
@@ -551,13 +551,13 @@ func (e *ensurer) EnsureAdditionalFiles(ctx context.Context, gctx gcontext.Garde
 		return nil
 	}
 
-	binConfig, err := e.ensureCredentialHelperBin()
+	binConfig, err := e.credentialProviderBinaryFile()
 	if err != nil {
 		return err
 	}
 	appendUniqueFile(newObj, *binConfig)
 
-	credConfig, err := e.ensureCredentialHelperFiles()
+	credConfig, err := e.credentialProviderConfigFile()
 	if err != nil {
 		return err
 	}
