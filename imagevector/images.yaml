@@ -268,9 +268,9 @@ images:
       integrity_requirement: 'high'
       availability_requirement: 'low'
 - name: ecr-credential-provider
-  sourceRepository: github.com/gardener/cloud-provider-aws
-  repository: europe-docker.pkg.dev/gardener-project/releases/kubernetes/ecr-credential-provider
-  tag: "ecr"
+  sourceRepository: github.com/gardener/ecr-credential-provider
+  repository: europe-docker.pkg.dev/gardener-project/releases/gardener/extensions/ecr-credential-provider
+  tag: "v1.29.0"
   labels:
     - name: 'gardener.cloud/cve-categorisation'
       value:
